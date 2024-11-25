@@ -103,3 +103,40 @@ func TestSomething(t *testing.T) {
 	require.Nil(t, err)
 	require.Len(t, *nums, 0)
 }
+
+type Book struct {
+	Name      string
+	Pages     int
+	Favourite bool
+}
+
+func TestStructAndEach(t *testing.T) {
+	martin := Book{Name: "Martin the Warrior", Pages: 375, Favourite: true}
+	mossflower := Book{Name: "Mossflower", Pages: 420, Favourite: true}
+	salamandastron := Book{Name: "Salamandastron", Pages: 336, Favourite: true}
+
+	ctx := context.Background()
+	b, err := bigset.Create[Book](logger)
+	require.Nil(t, err)
+
+	n, err := b.Add(ctx, "m books", martin, mossflower)
+	require.Nil(t, err)
+	require.Equal(t, n, int64(2))
+
+	n, err = b.Add(ctx, "s books", salamandastron)
+	require.Nil(t, err)
+	require.Equal(t, n, int64(1))
+
+	n, err = b.Union(ctx, "all books", "s books", "m books")
+	require.Nil(t, err)
+	require.Equal(t, n, int64(3))
+
+	var buffer Book
+	booksByName := make(map[string]Book)
+	err = b.Each(ctx, "all books", &buffer, func(ctx context.Context) error {
+		booksByName[buffer.Name] = buffer
+		return nil
+	})
+	require.Nil(t, err)
+	require.Equal(t, booksByName, map[string]Book{"Martin the Warrior": martin, "Mossflower": mossflower, "Salamandastron": salamandastron})
+}

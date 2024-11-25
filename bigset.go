@@ -15,7 +15,7 @@ import (
 // Bigset allows sets of json-encodable structures to be manipulated
 // on disk via sqlite. This reduces memory usage significantly when dealing
 // with large collections of objects.
-type Bigset[T comparable] struct {
+type Bigset[T any] struct {
 	logger   *zap.Logger
 	filename string
 	db       fastdb.FastDB
@@ -282,7 +282,7 @@ func (b *Bigset[T]) Close() error {
 }
 
 // Create creates a new Bigset.
-func Create[T comparable](logger *zap.Logger) (*Bigset[T], error) {
+func Create[T any](logger *zap.Logger) (*Bigset[T], error) {
 	tempfile, err := os.CreateTemp("", "bigset")
 	if err != nil {
 		return nil, err
