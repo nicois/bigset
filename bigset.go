@@ -12,6 +12,8 @@ import (
 	"go.uber.org/zap"
 )
 
+type KVMapper[T any] func(*T) ([]byte, []byte, error)
+
 // Bigset allows sets of json-encodable structures to be manipulated
 // on disk via sqlite. This reduces memory usage significantly when dealing
 // with large collections of objects.
@@ -20,10 +22,19 @@ type Bigset[T any] struct {
 	filename string
 	db       fastdb.FastDB
 	names    map[string]struct{}
+	mapper   KVMapper[T]
+}
+
+func IdentityMapper[T any](t *T) ([]byte, []byte, error) {
+	v, err := json.Marshal(t)
+	if err != nil {
+		return nil, nil, err
+	}
+	return v, v, nil
 }
 
 func (b *Bigset[T]) initialise(ctx context.Context, name string) error {
-	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS \"%v\" (v TEXT UNIQUE);", name)
+	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS \"%v\" (k BLOB UNIQUE, v BLOB);", name)
 	_, err := b.db.Writer().ExecContext(ctx, sql)
 	if err == nil {
 		b.names[name] = struct{}{}
@@ -117,9 +128,9 @@ func (b *Bigset[T]) Union(ctx context.Context, target string, source ...string) 
 	}
 	sqlArray := make([]string, 0, 1+len(source))
 	sqlArray = append(sqlArray, fmt.Sprintf("INSERT INTO \"%v\" ", target))
-	sqlArray = append(sqlArray, fmt.Sprintf("SELECT v FROM \"%v\" ", source[0]))
+	sqlArray = append(sqlArray, fmt.Sprintf("SELECT k, v FROM \"%v\" ", source[0]))
 	for _, sTable := range source[1:] {
-		sqlArray = append(sqlArray, fmt.Sprintf("UNION SELECT v FROM \"%v\"", sTable))
+		sqlArray = append(sqlArray, fmt.Sprintf("UNION SELECT k, v FROM \"%v\"", sTable))
 	}
 	return b.apply(ctx, sqlArray...)
 }
@@ -142,7 +153,7 @@ func (b *Bigset[T]) Subtract(ctx context.Context, target string, source ...strin
 	}
 	var result int64
 	for _, sTable := range source {
-		sql := fmt.Sprintf("DELETE FROM \"%v\" WHERE v IN (SELECT v FROM \"%v\")", target, sTable)
+		sql := fmt.Sprintf("DELETE FROM \"%v\" WHERE k IN (SELECT k FROM \"%v\")", target, sTable)
 		n, err := b.apply(ctx, sql)
 		if err != nil {
 			return -1, err
@@ -169,9 +180,9 @@ func (b *Bigset[T]) Intersection(ctx context.Context, target string, source ...s
 		return 0, nil
 	}
 	sqlArray := make([]string, 0, len(source))
-	sqlArray = append(sqlArray, fmt.Sprintf("INSERT INTO \"%v\" SELECT v FROM \"%v\" ", target, source[0]))
+	sqlArray = append(sqlArray, fmt.Sprintf("INSERT INTO \"%v\" SELECT k, \"%v\".v FROM \"%v\" ", target, source[0], source[0]))
 	for _, sTable := range source[1:] {
-		sqlArray = append(sqlArray, fmt.Sprintf("INNER JOIN \"%v\" USING (v)", sTable))
+		sqlArray = append(sqlArray, fmt.Sprintf("INNER JOIN \"%v\" USING (k)", sTable))
 	}
 	return b.apply(ctx, sqlArray...)
 }
@@ -200,18 +211,18 @@ func (b *Bigset[T]) Discard(ctx context.Context, name string, values ...T) (int6
 			return -1, err
 		}
 	}
-	sql := fmt.Sprintf("DELETE FROM \"%v\" WHERE v = ?", name)
+	sql := fmt.Sprintf("DELETE FROM \"%v\" WHERE k = ?", name)
 	stmt, err := b.db.Writer().PrepareContext(ctx, sql)
 	if err != nil {
 		return -1, err
 	}
 	result := int64(0)
 	for _, value := range values {
-		m, err := json.Marshal(value)
+		k, _, err := b.mapper(&value)
 		if err != nil {
 			return -1, err
 		}
-		execResult, err := stmt.ExecContext(ctx, m)
+		execResult, err := stmt.ExecContext(ctx, k)
 		if err != nil {
 			return -1, err
 		}
@@ -235,18 +246,18 @@ func (b *Bigset[T]) Add(ctx context.Context, name string, values ...T) (int64, e
 			return -1, err
 		}
 	}
-	sql := fmt.Sprintf("INSERT INTO \"%v\"(v) VALUES (?) ON CONFLICT (v) DO NOTHING;", name)
+	sql := fmt.Sprintf("INSERT INTO \"%v\"(k, v) VALUES (?, ?) ON CONFLICT (k) DO NOTHING;", name)
 	stmt, err := b.db.Writer().PrepareContext(ctx, sql)
 	if err != nil {
 		return -1, err
 	}
 	result := int64(0)
 	for _, value := range values {
-		m, err := json.Marshal(value)
+		k, v, err := b.mapper(&value)
 		if err != nil {
 			return -1, err
 		}
-		execResult, err := stmt.ExecContext(ctx, m)
+		execResult, err := stmt.ExecContext(ctx, k, v)
 		if err != nil {
 			return -1, err
 		}
@@ -281,8 +292,29 @@ func (b *Bigset[T]) Close() error {
 	return os.Remove(b.filename)
 }
 
+type option[T any] func(*Bigset[T]) error
+
+// WithKeyFunction allows a key function to be provided.
+// This, when applied to an element, will yield a bytestring which
+// will be used to identify this item.
+// This allows Bigset to understand that two items are actually the
+// same thing, avoiding duplicates.
+// This is useful when an item has mutable attributes, for example.
+func WithKeyFunction[T any](f func(*T) []byte) option[T] {
+	return func(b *Bigset[T]) error {
+		b.mapper = func(t *T) ([]byte, []byte, error) {
+			_, v, err := IdentityMapper(t)
+			if err != nil {
+				return nil, nil, err
+			}
+			return f(t), v, nil
+		}
+		return nil
+	}
+}
+
 // Create creates a new Bigset.
-func Create[T any](logger *zap.Logger) (*Bigset[T], error) {
+func Create[T any](logger *zap.Logger, options ...option[T]) (*Bigset[T], error) {
 	tempfile, err := os.CreateTemp("", "bigset")
 	if err != nil {
 		return nil, err
@@ -294,5 +326,15 @@ func Create[T any](logger *zap.Logger) (*Bigset[T], error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Bigset[T]{filename: tempfile.Name(), db: db, logger: logger, names: make(map[string]struct{}, 0)}, nil
+	result, err := &Bigset[T]{filename: tempfile.Name(), db: db, logger: logger, names: make(map[string]struct{}, 0), mapper: IdentityMapper[T]}, nil
+	if err != nil {
+		return nil, err
+	}
+	for _, opt := range options {
+		err = opt(result)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }

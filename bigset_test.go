@@ -33,6 +33,21 @@ func TestNames(t *testing.T) {
 	require.Equal(t, n, int64(-1))
 }
 
+func TestKeyFunction(t *testing.T) {
+	ctx := context.Background()
+	// 1, 11, 21, 31, 41, etc should all be consided the same
+	// object for the purposes of deduplication
+	keyFunction := func(i *int) []byte {
+		return []byte(fmt.Sprintf("%v", (*i)%10))
+	}
+	b, err := bigset.Create[int](logger, bigset.WithKeyFunction(keyFunction))
+	require.Nil(t, err)
+
+	n, err := b.Add(ctx, "foo", 1, 2, 3, 11, 12, 13, 21, 22, 23, 31, 32, 33)
+	require.Equal(t, n, int64(3))
+	require.Nil(t, err)
+}
+
 func TestSomething(t *testing.T) {
 	ctx := context.Background()
 	b, err := bigset.Create[int](logger)
