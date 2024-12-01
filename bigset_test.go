@@ -85,8 +85,9 @@ func TestSomething(t *testing.T) {
 
 	nums, err := b.Get(ctx, "i")
 	require.Nil(t, err)
-	require.Equal(t, 10, (*nums)[0])
-	require.Equal(t, &[]int{10}, nums)
+	require.Len(t, nums, 1)
+	require.Equal(t, nums[0], 10)
+	require.Equal(t, nums, []int{10})
 
 	// generate and check the union
 	n, err = b.Union(ctx, "u", "foo", "bar")
@@ -95,9 +96,9 @@ func TestSomething(t *testing.T) {
 
 	nums, err = b.Get(ctx, "u")
 	require.Nil(t, err)
-	require.Contains(t, *nums, 10)
-	require.Contains(t, *nums, 13)
-	require.NotContains(t, *nums, 23)
+	require.Contains(t, nums, 10)
+	require.Contains(t, nums, 13)
+	require.NotContains(t, nums, 23)
 
 	// discard some elements
 	n, err = b.Discard(ctx, "u", 10, 13)
@@ -116,7 +117,7 @@ func TestSomething(t *testing.T) {
 
 	nums, err = b.Get(ctx, "u")
 	require.Nil(t, err)
-	require.Len(t, *nums, 0)
+	require.Len(t, nums, 0)
 }
 
 type Book struct {
@@ -153,5 +154,13 @@ func TestStructAndEach(t *testing.T) {
 		return nil
 	})
 	require.Nil(t, err)
-	require.Equal(t, booksByName, map[string]Book{"Martin the Warrior": martin, "Mossflower": mossflower, "Salamandastron": salamandastron})
+	require.Equal(
+		t,
+		booksByName,
+		map[string]Book{
+			"Martin the Warrior": martin,
+			"Mossflower":         mossflower,
+			"Salamandastron":     salamandastron,
+		},
+	)
 }
