@@ -134,9 +134,25 @@ func TestKeyFunction(t *testing.T) {
 	b, err := bigset.Create[int](logger, bigset.WithKeyFunction(keyFunction))
 	require.Nil(t, err)
 
-	n, err := b.Add(ctx, "foo", 1, 2, 3, 11, 12, 13, 21, 22, 23, 31, 32, 33)
+	n, err := b.Add(ctx, "foo", 703, 2, 3, 11, 12, 13, 21, 22, 23, 31, 32, 33)
 	require.Equal(t, n, int64(3))
 	require.Nil(t, err)
+
+	n, err = b.Add(ctx, "bar", 101, 102, 104)
+	require.Nil(t, err)
+	require.Equal(t, int64(3), n)
+
+	n, err = b.Add(ctx, "baz", 204, 208, 209)
+	require.Nil(t, err)
+	require.Equal(t, int64(3), n)
+
+	n, err = b.Union(ctx, "all", "foo", "bar", "baz")
+	require.Nil(t, err)
+	require.Equal(t, int64(6), n)
+
+	n, err = b.Intersection(ctx, "none", "foo", "bar", "baz")
+	require.Nil(t, err)
+	require.Equal(t, int64(0), n)
 }
 
 func TestFilename(t *testing.T) {
@@ -202,8 +218,9 @@ func TestSomething(t *testing.T) {
 
 	nums, err := b.Get(ctx, "i")
 	require.Nil(t, err)
-	require.Equal(t, 10, (*nums)[0])
-	require.Equal(t, &[]int{10}, nums)
+	require.Len(t, nums, 1)
+	require.Equal(t, nums[0], 10)
+	require.Equal(t, nums, []int{10})
 
 	// generate and check the union
 	n, err = b.Union(ctx, "u", "foo", "bar")
@@ -212,9 +229,9 @@ func TestSomething(t *testing.T) {
 
 	nums, err = b.Get(ctx, "u")
 	require.Nil(t, err)
-	require.Contains(t, *nums, 10)
-	require.Contains(t, *nums, 13)
-	require.NotContains(t, *nums, 23)
+	require.Contains(t, nums, 10)
+	require.Contains(t, nums, 13)
+	require.NotContains(t, nums, 23)
 
 	// discard some elements
 	n, err = b.Discard(ctx, "u", 10, 13)
@@ -233,9 +250,8 @@ func TestSomething(t *testing.T) {
 
 	nums, err = b.Get(ctx, "u")
 	require.Nil(t, err)
-	require.Len(t, *nums, 0)
 
-	require.Nil(t, b.Close())
+	require.Len(t, nums, 0)
 }
 
 type Book struct {

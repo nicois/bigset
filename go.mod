@@ -1,6 +1,6 @@
 module github.com/nicois/bigset
 
-go 1.22.7
+go 1.23
 
 require (
 	github.com/nicois/fastdb v0.0.0-20240511060213-776b25c4dbb9

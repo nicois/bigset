@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/nicois/fastdb"
@@ -124,35 +126,84 @@ func (b *Bigset[T]) RetrieveIfExists(ctx context.Context, name string, t T) (*T,
 	return nil, nil
 }
 
-// Get returns a pointer to a list of all the items in a set
-func (b *Bigset[T]) Get(ctx context.Context, name string) (*[]T, error) {
-	if err := verifyNames(name); err != nil {
-		return nil, err
-	}
-	size, err := b.Cardinality(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]T, 0, size)
-	var buffer T
-
-	err = b.Each(ctx, name, &buffer, func(ctx context.Context) error {
-		result = append(result, buffer)
-		return nil
+// CollectError returns a slice of []K elements, gathered from
+// a iter.Seq2 collection of [*K, error] pairs.
+// If any element's error is non-nil, the slice will be nil,
+// and the error will be returned.
+func CollectError[T any](seq iter.Seq2[*T, error]) ([]T, error) {
+	var err error
+	result := slices.Collect[T](func(yield func(t T) bool) {
+		for k, v := range seq {
+			if v != nil {
+				err = v
+				return
+			}
+			if !yield(*k) {
+				return
+			}
+		}
 	})
-	if err != nil {
+	if err == nil {
+		return result, nil
+	} else {
 		return nil, err
 	}
+}
 
-	if int64(len(result)) > size {
-		b.logger.Warn(
-			"Set has grown during read, leading to less efficient memory usage",
-			zap.String("set name", name),
-			zap.Int64("expected size", size),
-			zap.Int("actual size", len(result)),
-		)
+// Get returns a slice to copies of each item in the set.
+func (b *Bigset[T]) Get(ctx context.Context, name string) ([]T, error) {
+	return CollectError[T](b.All(ctx, name))
+}
+
+// All returns an iterator to copies of items in the set. These are safe to mutate
+// without affecting the set.
+func (b *Bigset[T]) All(ctx context.Context, name string) iter.Seq2[*T, error] {
+	if err := verifyNames(name); err != nil {
+		return func(yield func(*T, error) bool) {
+			yield(nil, err)
+		}
 	}
-	return &result, nil
+	expectedSize, err := b.Cardinality(ctx, name)
+	if err != nil {
+		return func(yield func(*T, error) bool) {
+			yield(nil, err)
+		}
+	}
+	return func(yield func(*T, error) bool) {
+		rows, err := b.db.Reader().QueryContext(ctx, fmt.Sprintf("SELECT v FROM \"%v\"", name))
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		defer rows.Close()
+		var actualSize int64
+		rawRow := sql.RawBytes{}
+		for rows.Next() {
+			var buffer T
+			err = rows.Scan(&rawRow)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			err = json.Unmarshal(rawRow, &buffer)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if !yield(&buffer, nil) {
+				return
+			}
+			actualSize++
+		}
+		if actualSize != expectedSize {
+			b.logger.Warn(
+				"Set has changed during read, potentially resulting in less efficient memory usage",
+				zap.String("set name", name),
+				zap.Int64("expected size", expectedSize),
+				zap.Int64("actual size", actualSize),
+			)
+		}
+	}
 }
 
 // Union adds every element of each source set to the target set.
@@ -170,12 +221,13 @@ func (b *Bigset[T]) Union(ctx context.Context, target string, source ...string) 
 	if len(source) < 1 {
 		return 0, nil
 	}
-	sqlArray := make([]string, 0, 1+len(source))
-	sqlArray = append(sqlArray, fmt.Sprintf("INSERT INTO \"%v\" ", target))
-	sqlArray = append(sqlArray, fmt.Sprintf("SELECT k, v FROM \"%v\" ", source[0]))
+	sqlArray := make([]string, 0, 2+len(source))
+	sqlArray = append(sqlArray, fmt.Sprintf("INSERT INTO \"%v\"", target))
+	sqlArray = append(sqlArray, fmt.Sprintf("SELECT k, v FROM \"%v\" WHERE true", source[0]))
 	for _, sTable := range source[1:] {
-		sqlArray = append(sqlArray, fmt.Sprintf("UNION SELECT k, v FROM \"%v\"", sTable))
+		sqlArray = append(sqlArray, fmt.Sprintf("UNION SELECT k, v FROM \"%v\" WHERE true", sTable))
 	}
+	sqlArray = append(sqlArray, "ON CONFLICT (k) DO NOTHING;")
 	return b.apply(ctx, sqlArray...)
 }
 
@@ -227,7 +279,7 @@ func (b *Bigset[T]) Intersection(
 	if len(source) < 1 {
 		return 0, nil
 	}
-	sqlArray := make([]string, 0, len(source))
+	sqlArray := make([]string, 0, 1+len(source))
 	sqlArray = append(
 		sqlArray,
 		fmt.Sprintf(
@@ -240,11 +292,12 @@ func (b *Bigset[T]) Intersection(
 	for _, sTable := range source[1:] {
 		sqlArray = append(sqlArray, fmt.Sprintf("INNER JOIN \"%v\" USING (k)", sTable))
 	}
+	sqlArray = append(sqlArray, "ON CONFLICT (k) DO NOTHING;")
 	return b.apply(ctx, sqlArray...)
 }
 
 func (b *Bigset[T]) apply(ctx context.Context, sqlArray ...string) (int64, error) {
-	sql := strings.Join(sqlArray, "")
+	sql := strings.Join(sqlArray, " ")
 	result, err := b.db.Writer().ExecContext(ctx, sql)
 	if err != nil {
 		return -1, err
