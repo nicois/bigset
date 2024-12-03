@@ -3,8 +3,11 @@ package bigset_test
 import (
 	"context"
 	"fmt"
+	"iter"
 	"os"
 	"testing"
+
+	"golang.org/x/exp/constraints"
 
 	"github.com/nicois/bigset"
 	"github.com/stretchr/testify/require"
@@ -299,4 +302,61 @@ func TestStructAndEach(t *testing.T) {
 	)
 
 	require.Nil(t, b.Close())
+}
+
+func intRange[T constraints.Integer](offset, step, count T) iter.Seq[T] {
+	return func(yield func(T) bool) {
+		var i T
+		for i = 0; i < count; i++ {
+			if !yield(offset + step*i) {
+				return
+			}
+		}
+	}
+}
+
+func benchmarkOperations(n int) {
+	ctx := context.Background()
+	b, err := bigset.Create[int](logger)
+	// add one element
+	if _, err = b.AddSeq(ctx, "fives", intRange(0, 5, n)); err != nil {
+		panic(err)
+	}
+	if _, err = b.AddSeq(ctx, "sevens", intRange(0, 7, n)); err != nil {
+		panic(err)
+	}
+	if _, err = b.AddSeq(ctx, "nines", intRange(0, 9, n)); err != nil {
+		panic(err)
+	}
+
+	if _, err = b.Intersection(ctx, "5 and 7", "fives", "sevens"); err != nil {
+		panic(err)
+	}
+
+	if _, err = b.Intersection(ctx, "5 and 9", "fives", "nines"); err != nil {
+		panic(err)
+	}
+
+	if _, err = b.Union(ctx, "union", "5 and 7", "5 and 9"); err != nil {
+		panic(err)
+	}
+}
+
+func BenchmarkOperations10(b *testing.B) {
+    b.ReportAllocs()
+	for n := 0; n < b.N; n++ {
+		benchmarkOperations(10)
+	}
+}
+func BenchmarkOperations100(b *testing.B) {
+    b.ReportAllocs()
+	for n := 0; n < b.N; n++ {
+		benchmarkOperations(100)
+	}
+}
+func BenchmarkOperations1K(b *testing.B) {
+    b.ReportAllocs()
+	for n := 0; n < b.N; n++ {
+		benchmarkOperations(1_000)
+	}
 }

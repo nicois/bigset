@@ -130,7 +130,7 @@ func (b *Bigset[T]) RetrieveIfExists(ctx context.Context, name string, t T) (*T,
 // a iter.Seq2 collection of [*K, error] pairs.
 // If any element's error is non-nil, the slice will be nil,
 // and the error will be returned.
-func CollectError[T any](seq iter.Seq2[*T, error]) ([]T, error) {
+func CollectError[T any](seq iter.Seq2[T, error]) ([]T, error) {
 	var err error
 	result := slices.Collect[T](func(yield func(t T) bool) {
 		for k, v := range seq {
@@ -138,16 +138,12 @@ func CollectError[T any](seq iter.Seq2[*T, error]) ([]T, error) {
 				err = v
 				return
 			}
-			if !yield(*k) {
+			if !yield(k) {
 				return
 			}
 		}
 	})
-	if err == nil {
-		return result, nil
-	} else {
-		return nil, err
-	}
+	return result, err
 }
 
 // Get returns a slice to copies of each item in the set.
@@ -157,40 +153,42 @@ func (b *Bigset[T]) Get(ctx context.Context, name string) ([]T, error) {
 
 // All returns an iterator to copies of items in the set. These are safe to mutate
 // without affecting the set.
-func (b *Bigset[T]) All(ctx context.Context, name string) iter.Seq2[*T, error] {
+func (b *Bigset[T]) All(ctx context.Context, name string) iter.Seq2[T, error] {
 	if err := verifyNames(name); err != nil {
-		return func(yield func(*T, error) bool) {
-			yield(nil, err)
+		return func(yield func(T, error) bool) {
+			var buffer T
+			yield(buffer, err)
 		}
 	}
 	expectedSize, err := b.Cardinality(ctx, name)
 	if err != nil {
-		return func(yield func(*T, error) bool) {
-			yield(nil, err)
+		return func(yield func(T, error) bool) {
+			var buffer T
+			yield(buffer, err)
 		}
 	}
-	return func(yield func(*T, error) bool) {
+	return func(yield func(T, error) bool) {
+		var buffer T
 		rows, err := b.db.Reader().QueryContext(ctx, fmt.Sprintf("SELECT v FROM \"%v\"", name))
 		if err != nil {
-			yield(nil, err)
+			yield(buffer, err)
 			return
 		}
 		defer rows.Close()
 		var actualSize int64
 		rawRow := sql.RawBytes{}
 		for rows.Next() {
-			var buffer T
 			err = rows.Scan(&rawRow)
 			if err != nil {
-				yield(nil, err)
+				yield(buffer, err)
 				return
 			}
 			err = json.Unmarshal(rawRow, &buffer)
 			if err != nil {
-				yield(nil, err)
+				yield(buffer, err)
 				return
 			}
-			if !yield(&buffer, nil) {
+			if !yield(buffer, nil) {
 				return
 			}
 			actualSize++
@@ -348,8 +346,7 @@ func (b *Bigset[T]) Discard(ctx context.Context, name string, values ...T) (int6
 // same key value already exists.
 // Returns the number of elements actually added.
 func (b *Bigset[T]) Add(ctx context.Context, name string, values ...T) (int64, error) {
-	sql := fmt.Sprintf("INSERT INTO \"%v\"(k, v) VALUES (?, ?) ON CONFLICT (k) DO NOTHING;", name)
-	return b.add(ctx, name, sql, values...)
+	return b.AddSeq(ctx, name, slices.Values(values))
 }
 
 // Supersede inserts elements into a set, replacing existing
@@ -360,7 +357,7 @@ func (b *Bigset[T]) Supersede(ctx context.Context, name string, values ...T) (in
 		"INSERT INTO \"%v\"(k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v=excluded.v;",
 		name,
 	)
-	return b.add(ctx, name, sql, values...)
+	return b.addSeq(ctx, name, sql, slices.Values(values))
 }
 
 // Refresh replaces elements with new values, but only
@@ -374,10 +371,22 @@ func (b *Bigset[T]) Refresh(ctx context.Context, name string, values ...T) (int6
 		name,
 		name,
 	)
-	return b.add(ctx, name, sql, values...)
+	return b.addSeq(ctx, name, sql, slices.Values(values))
 }
 
-func (b *Bigset[T]) add(ctx context.Context, name string, sql string, values ...T) (int64, error) {
+// AddSeq inserts elements into a set, if not already present.
+// Returns the number of elements actually added.
+func (b *Bigset[T]) AddSeq(ctx context.Context, name string, values iter.Seq[T]) (int64, error) {
+	sql := fmt.Sprintf("INSERT INTO \"%v\"(k, v) VALUES (?, ?) ON CONFLICT (k) DO NOTHING;", name)
+	return b.addSeq(ctx, name, sql, values)
+}
+
+func (b *Bigset[T]) addSeq(
+	ctx context.Context,
+	name string,
+	sql string,
+	values iter.Seq[T],
+) (int64, error) {
 	if err := verifyNames(name); err != nil {
 		return -1, err
 	}
@@ -391,7 +400,7 @@ func (b *Bigset[T]) add(ctx context.Context, name string, sql string, values ...
 		return -1, err
 	}
 	result := int64(0)
-	for _, value := range values {
+	for value := range values {
 		k, v, err := b.mapper(&value)
 		if err != nil {
 			return -1, err
