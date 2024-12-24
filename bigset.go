@@ -20,6 +20,7 @@ type KVMapper[T any] func(*T) ([]byte, []byte, error)
 type Bigset[T any] struct {
 	logger   *zap.Logger
 	filename string
+	keepFile bool
 	db       fastdb.FastDB
 	names    map[string]struct{}
 	mapper   KVMapper[T]
@@ -58,7 +59,12 @@ func (b *Bigset[T]) Cardinality(ctx context.Context, name string) (int64, error)
 
 // Each executes the provided function on each item of the set in turn.
 // During each iteration, the `buffer` is populated with a different value.
-func (b *Bigset[T]) Each(ctx context.Context, name string, buffer *T, f func(ctx context.Context) error) error {
+func (b *Bigset[T]) Each(
+	ctx context.Context,
+	name string,
+	buffer *T,
+	f func(ctx context.Context) error,
+) error {
 	if err := verifyNames(name); err != nil {
 		return err
 	}
@@ -106,7 +112,12 @@ func (b *Bigset[T]) Get(ctx context.Context, name string) (*[]T, error) {
 	}
 
 	if int64(len(result)) > size {
-		b.logger.Warn("Set has grown during read, leading to less efficient memory usage", zap.String("set name", name), zap.Int64("expected size", size), zap.Int("actual size", len(result)))
+		b.logger.Warn(
+			"Set has grown during read, leading to less efficient memory usage",
+			zap.String("set name", name),
+			zap.Int64("expected size", size),
+			zap.Int("actual size", len(result)),
+		)
 	}
 	return &result, nil
 }
@@ -167,7 +178,11 @@ func (b *Bigset[T]) Subtract(ctx context.Context, target string, source ...strin
 // Any elements already present in `target` are retained, regardless of whether they
 // are also in the source sets.
 // Returns the number of added elements.
-func (b *Bigset[T]) Intersection(ctx context.Context, target string, source ...string) (int64, error) {
+func (b *Bigset[T]) Intersection(
+	ctx context.Context,
+	target string,
+	source ...string,
+) (int64, error) {
 	if err := verifyNames(target, source...); err != nil {
 		return -1, err
 	}
@@ -180,7 +195,15 @@ func (b *Bigset[T]) Intersection(ctx context.Context, target string, source ...s
 		return 0, nil
 	}
 	sqlArray := make([]string, 0, len(source))
-	sqlArray = append(sqlArray, fmt.Sprintf("INSERT INTO \"%v\" SELECT k, \"%v\".v FROM \"%v\" ", target, source[0], source[0]))
+	sqlArray = append(
+		sqlArray,
+		fmt.Sprintf(
+			"INSERT INTO \"%v\" SELECT k, \"%v\".v FROM \"%v\" ",
+			target,
+			source[0],
+			source[0],
+		),
+	)
 	for _, sTable := range source[1:] {
 		sqlArray = append(sqlArray, fmt.Sprintf("INNER JOIN \"%v\" USING (k)", sTable))
 	}
@@ -289,6 +312,9 @@ func (b *Bigset[T]) Close() error {
 		return err
 	}
 	b.db = nil
+	if b.keepFile {
+		return nil
+	}
 	return os.Remove(b.filename)
 }
 
@@ -313,28 +339,41 @@ func WithKeyFunction[T any](f func(*T) []byte) option[T] {
 	}
 }
 
+func WithFilename[T any](filename string) option[T] {
+	return func(b *Bigset[T]) error {
+		b.filename = filename
+		b.keepFile = true
+		return nil
+	}
+}
+
 // Create creates a new Bigset.
 func Create[T any](logger *zap.Logger, options ...option[T]) (*Bigset[T], error) {
-	tempfile, err := os.CreateTemp("", "bigset")
-	if err != nil {
-		return nil, err
-	}
-	if err = tempfile.Close(); err != nil {
-		return nil, err
-	}
-	db, err := fastdb.Open(tempfile.Name())
-	if err != nil {
-		return nil, err
-	}
-	result, err := &Bigset[T]{filename: tempfile.Name(), db: db, logger: logger, names: make(map[string]struct{}, 0), mapper: IdentityMapper[T]}, nil
-	if err != nil {
-		return nil, err
+	result := &Bigset[T]{
+		logger: logger,
+		names:  make(map[string]struct{}, 0),
+		mapper: IdentityMapper[T],
 	}
 	for _, opt := range options {
-		err = opt(result)
+		err := opt(result)
 		if err != nil {
 			return nil, err
 		}
 	}
+	if result.filename == "" {
+		tempfile, err := os.CreateTemp("", "bigset")
+		if err != nil {
+			return nil, err
+		}
+		result.filename = tempfile.Name()
+		if err = tempfile.Close(); err != nil {
+			return nil, err
+		}
+	}
+	db, err := fastdb.Open(result.filename)
+	if err != nil {
+		return nil, err
+	}
+	result.db = db
 	return result, nil
 }

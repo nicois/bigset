@@ -48,6 +48,32 @@ func TestKeyFunction(t *testing.T) {
 	require.Nil(t, err)
 }
 
+func TestFilename(t *testing.T) {
+	tempfile, err := os.CreateTemp("", "bigset-test")
+	require.Nil(t, err)
+	require.Nil(t, tempfile.Close())
+
+	filename := tempfile.Name()
+	ctx := context.Background()
+	b, err := bigset.Create[int](logger, bigset.WithFilename[int](filename))
+	require.Nil(t, err)
+
+	// add two elements
+	n, err := b.Add(ctx, "foo", 10, 20)
+	require.Nil(t, err)
+	require.Equal(t, n, int64(2))
+
+	require.Nil(t, b.Close())
+
+	b2, err := bigset.Create[int](logger, bigset.WithFilename[int](filename))
+	require.Nil(t, err)
+	// add 3 elements, one of them new
+	n, err = b2.Add(ctx, "foo", 10, 20, 30)
+	require.Nil(t, err)
+	require.Equal(t, n, int64(1))
+	require.Nil(t, b2.Close())
+}
+
 func TestSomething(t *testing.T) {
 	ctx := context.Background()
 	b, err := bigset.Create[int](logger)
@@ -117,6 +143,8 @@ func TestSomething(t *testing.T) {
 	nums, err = b.Get(ctx, "u")
 	require.Nil(t, err)
 	require.Len(t, *nums, 0)
+
+	require.Nil(t, b.Close())
 }
 
 type Book struct {
@@ -153,5 +181,15 @@ func TestStructAndEach(t *testing.T) {
 		return nil
 	})
 	require.Nil(t, err)
-	require.Equal(t, booksByName, map[string]Book{"Martin the Warrior": martin, "Mossflower": mossflower, "Salamandastron": salamandastron})
+	require.Equal(
+		t,
+		booksByName,
+		map[string]Book{
+			"Martin the Warrior": martin,
+			"Mossflower":         mossflower,
+			"Salamandastron":     salamandastron,
+		},
+	)
+
+	require.Nil(t, b.Close())
 }
