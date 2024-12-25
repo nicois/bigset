@@ -33,6 +33,57 @@ func TestNames(t *testing.T) {
 	require.Equal(t, n, int64(-1))
 }
 
+func TestSupersede(t *testing.T) {
+	ctx := context.Background()
+	// books with the same name are considered the "same"
+	keyFunction := func(b *Book) []byte {
+		return []byte(fmt.Sprintf("%v", b.Name))
+	}
+	b, err := bigset.Create[Book](logger, bigset.WithKeyFunction(keyFunction))
+	require.Nil(t, err)
+
+	n, err := b.Add(
+		ctx,
+		"foo",
+		Book{Name: "y", Pages: 5},
+		Book{Name: "x", Pages: 10},
+		Book{Name: "x", Pages: 20},
+		Book{Name: "x", Pages: 30},
+		Book{Name: "y", Pages: 8},
+	)
+	require.Equal(t, int64(2), n)
+	require.Nil(t, err)
+
+	var buffer Book
+	err = b.Each(ctx, "foo", &buffer, func(ctx context.Context) error {
+		fmt.Printf("%+v\n", buffer.Name)
+		return nil
+	})
+	require.Nil(t, err)
+
+	book, err := b.RetrieveIfExists(ctx, "foo", Book{Name: "x"})
+	require.Nil(t, err)
+	require.NotNil(t, book)
+	require.Equal(t, 10, book.Pages)
+
+	// this should displace the previously-existing values
+	// for x and y, and insert z
+	n, err = b.Supersede(
+		ctx,
+		"foo",
+		Book{Name: "x", Pages: 40},
+		Book{Name: "y", Pages: 12},
+		Book{Name: "z", Pages: 100},
+	)
+	require.Nil(t, err)
+	require.Equal(t, int64(3), n)
+
+	book, err = b.RetrieveIfExists(ctx, "foo", Book{Name: "x"})
+	require.Nil(t, err)
+	require.NotNil(t, book)
+	require.Equal(t, 40, book.Pages)
+}
+
 func TestKeyFunction(t *testing.T) {
 	ctx := context.Background()
 	// 1, 11, 21, 31, 41, etc should all be consided the same

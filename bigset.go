@@ -91,6 +91,39 @@ func (b *Bigset[T]) Each(
 	return nil
 }
 
+// RetrieveIfExists returns the object stored in the nominated set
+// which has the same key as the provided object.
+func (b *Bigset[T]) RetrieveIfExists(ctx context.Context, name string, t T) (*T, error) {
+	if err := verifyNames(name); err != nil {
+		return nil, err
+	}
+	var buffer T
+
+	key, _, err := b.mapper(&t)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := b.db.Reader().
+		QueryContext(ctx, fmt.Sprintf("SELECT v FROM \"%v\" WHERE k = ?", name), key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	rawRow := sql.RawBytes{}
+	if rows.Next() {
+		err = rows.Scan(&rawRow)
+		if err != nil {
+			return nil, err
+		}
+		err = json.Unmarshal(rawRow, &buffer)
+		if err != nil {
+			return nil, err
+		}
+		return &buffer, nil
+	}
+	return nil, nil
+}
+
 // Get returns a pointer to a list of all the items in a set
 func (b *Bigset[T]) Get(ctx context.Context, name string) (*[]T, error) {
 	if err := verifyNames(name); err != nil {
@@ -258,9 +291,26 @@ func (b *Bigset[T]) Discard(ctx context.Context, name string, values ...T) (int6
 	return result, nil
 }
 
-// Add inserts elements into a set, if not already present.
+// Add inserts elements into a set, unless an element with the
+// same key value already exists.
 // Returns the number of elements actually added.
 func (b *Bigset[T]) Add(ctx context.Context, name string, values ...T) (int64, error) {
+	sql := fmt.Sprintf("INSERT INTO \"%v\"(k, v) VALUES (?, ?) ON CONFLICT (k) DO NOTHING;", name)
+	return b.add(ctx, name, sql, values...)
+}
+
+// Supersede inserts elements into a set, replacing existing
+// elements with the same key value.
+// Returns the number of elements actually added.
+func (b *Bigset[T]) Supersede(ctx context.Context, name string, values ...T) (int64, error) {
+	sql := fmt.Sprintf(
+		"INSERT INTO \"%v\"(k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v=excluded.v;",
+		name,
+	)
+	return b.add(ctx, name, sql, values...)
+}
+
+func (b *Bigset[T]) add(ctx context.Context, name string, sql string, values ...T) (int64, error) {
 	if err := verifyNames(name); err != nil {
 		return -1, err
 	}
@@ -269,7 +319,6 @@ func (b *Bigset[T]) Add(ctx context.Context, name string, values ...T) (int64, e
 			return -1, err
 		}
 	}
-	sql := fmt.Sprintf("INSERT INTO \"%v\"(k, v) VALUES (?, ?) ON CONFLICT (k) DO NOTHING;", name)
 	stmt, err := b.db.Writer().PrepareContext(ctx, sql)
 	if err != nil {
 		return -1, err
@@ -339,6 +388,10 @@ func WithKeyFunction[T any](f func(*T) []byte) option[T] {
 	}
 }
 
+// WithFilename specifies the sqlite3 file name to be used.
+// With this, the stored data will be persisted across executions.
+// No checking is done that the serialised data matches the definition of
+// the generic type; it is your responsibility to ensure it does not change!
 func WithFilename[T any](filename string) option[T] {
 	return func(b *Bigset[T]) error {
 		b.filename = filename
