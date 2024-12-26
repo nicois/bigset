@@ -301,10 +301,24 @@ func (b *Bigset[T]) Add(ctx context.Context, name string, values ...T) (int64, e
 
 // Supersede inserts elements into a set, replacing existing
 // elements with the same key value.
-// Returns the number of elements actually added.
+// Returns the number of elements added or updated.
 func (b *Bigset[T]) Supersede(ctx context.Context, name string, values ...T) (int64, error) {
 	sql := fmt.Sprintf(
 		"INSERT INTO \"%v\"(k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v=excluded.v;",
+		name,
+	)
+	return b.add(ctx, name, sql, values...)
+}
+
+// Refresh replaces elements with new values, but only
+// if an element with the same key already exists.
+// Returns the number of elements actually updated.
+func (b *Bigset[T]) Refresh(ctx context.Context, name string, values ...T) (int64, error) {
+	// this is a bit messy as the sqlite3 params are k and v, in that order
+	sql := fmt.Sprintf(
+		"WITH x744r1xoruth AS (SELECT k, v FROM \"%v\" WHERE k = ?) UPDATE \"%v\" SET v = ? FROM x744r1xoruth WHERE \"%v\".k = x744r1xoruth.k;",
+		name,
+		name,
 		name,
 	)
 	return b.add(ctx, name, sql, values...)
